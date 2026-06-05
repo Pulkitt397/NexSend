@@ -3,15 +3,28 @@
 import { useParams, useRouter } from 'next/navigation';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { ArrowLeft, Check } from 'lucide-react';
-import { doc, onSnapshot, getDoc } from 'firebase/firestore';
-import { db, ensureAuth } from '@/lib/firebase';
+import { getSupabase, ensureAuth } from '@/lib/supabase';
 import { useFileTransfer } from '@/hooks/useFileTransfer';
 import CreateRoom from '@/components/CreateRoom';
 import FileDropzone from '@/components/FileDropzone';
 import FileReceiver from '@/components/FileReceiver';
 import TransferProgress from '@/components/TransferProgress';
 import ToastContainer, { toast } from '@/components/Toast';
-import type { RoomData, FileItem } from '@/types';
+import type { RoomData, FileItem, RoomRow } from '@/types';
+
+function rowToRoom(row: RoomRow): RoomData {
+  return {
+    code: row.code,
+    createdAt: Number(row.created_at),
+    expiresAt: Number(row.expires_at),
+    senderId: row.sender_id,
+    receiverId: row.receiver_id,
+    senderConnected: row.sender_connected,
+    receiverConnected: row.receiver_connected,
+    status: row.status,
+    files: (row.files || []) as FileItem[],
+  };
+}
 
 export default function RoomPage() {
   const { code } = useParams<{ code: string }>();
@@ -27,18 +40,24 @@ export default function RoomPage() {
   useEffect(() => {
     if (!code || typeof code !== 'string') return;
     let cancelled = false;
+    const supabase = getSupabase();
 
     const init = async () => {
       try {
-        const snap = await getDoc(doc(db, 'rooms', code));
-        if (!snap.exists()) {
+        const { data: row, error: fetchError } = await supabase
+          .from('rooms')
+          .select('*')
+          .eq('code', code)
+          .maybeSingle();
+
+        if (fetchError) throw fetchError;
+        if (!row) {
           toast('Room not found', 'error');
           router.push('/');
           return;
         }
-        const data = snap.data() as RoomData;
 
-        if (data.expiresAt < Date.now() || data.status === 'expired') {
+        if (row.expires_at < Date.now() || row.status === 'expired') {
           toast('This room has expired', 'error');
           router.push('/');
           return;
@@ -47,29 +66,43 @@ export default function RoomPage() {
         const uid = await ensureAuth();
         let detectedRole: 'sender' | 'receiver' = 'receiver';
 
-        if (data.senderId === uid) {
+        if (row.sender_id === uid) {
           detectedRole = 'sender';
         }
-        // if no receiver assigned yet, assign this device as receiver
-        if (detectedRole === 'receiver' && !data.receiverId) {
-          const { updateDoc } = await import('firebase/firestore');
-          await updateDoc(doc(db, 'rooms', code), {
-            receiverId: uid,
-            receiverConnected: true,
-            status: 'connected',
-          });
+
+        if (detectedRole === 'receiver' && !row.receiver_id) {
+          await supabase
+            .from('rooms')
+            .update({
+              receiver_id: uid,
+              receiver_connected: true,
+              status: 'connected',
+            })
+            .eq('code', code);
         }
 
         if (cancelled) return;
         setRole(detectedRole);
-        setRoom(data);
+        setRoom(rowToRoom(row));
         setLoading(false);
 
-        const unsub = onSnapshot(doc(db, 'rooms', code), (s) => {
-          if (!s.exists()) { setRoom(null); return; }
-          setRoom(s.data() as RoomData);
-        });
-        unsubRef.current = unsub;
+        const channel = supabase
+          .channel(`room-direct:${code}`)
+          .on('postgres_changes',
+            {
+              event: '*',
+              schema: 'public',
+              table: 'rooms',
+              filter: `code=eq.${code}`,
+            },
+            (payload) => {
+              if (payload.eventType === 'DELETE') { setRoom(null); return; }
+              setRoom(rowToRoom(payload.new as RoomRow));
+            }
+          )
+          .subscribe();
+
+        unsubRef.current = () => { supabase.removeChannel(channel); };
       } catch {
         if (!cancelled) router.push('/');
       }
@@ -85,11 +118,11 @@ export default function RoomPage() {
   const handleFileSelected = useCallback(async (file: File) => {
     if (!room) return;
     const fileItem = await uploadFile(file, room.code, async (item) => {
-      const { updateDoc } = await import('firebase/firestore');
-      await updateDoc(doc(db, 'rooms', room.code), {
-        files: [item],
-        status: 'transferring',
-      });
+      const supabase = getSupabase();
+      await supabase
+        .from('rooms')
+        .update({ files: [item], status: 'transferring' })
+        .eq('code', room.code);
     });
     if (fileItem) toast('File uploaded', 'success');
   }, [room, uploadFile]);
@@ -98,18 +131,22 @@ export default function RoomPage() {
     if (!room) return null;
     const blob = await downloadFile(fileItem, room.code);
     if (blob) {
-      const { updateDoc } = await import('firebase/firestore');
+      const supabase = getSupabase();
       const updatedFiles = (room.files || []).map((f) =>
         f.id === fileItem.id ? { ...f, downloaded: true } : f
       );
       const allDownloaded = updatedFiles.every((f) => f.downloaded);
-      await updateDoc(doc(db, 'rooms', room.code), {
-        files: updatedFiles,
-        status: allDownloaded ? 'completed' : room.status,
-      });
+
+      await supabase
+        .from('rooms')
+        .update({
+          files: updatedFiles,
+          status: allDownloaded ? 'completed' : room.status,
+        })
+        .eq('code', room.code);
+
       if (allDownloaded) {
-        const { deleteDoc } = await import('firebase/firestore');
-        await deleteDoc(doc(db, 'rooms', room.code));
+        await supabase.from('rooms').delete().eq('code', room.code);
       }
       toast('File downloaded', 'success');
     }

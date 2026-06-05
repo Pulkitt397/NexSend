@@ -1,20 +1,23 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import {
-  doc,
-  setDoc,
-  getDoc,
-  updateDoc,
-  onSnapshot,
-  deleteDoc,
-  serverTimestamp,
-  Timestamp,
-} from 'firebase/firestore';
-import { ref, deleteObject } from 'firebase/storage';
-import { db, storage, ensureAuth } from '@/lib/firebase';
+import { getSupabase, ensureAuth } from '@/lib/supabase';
 import { generateRoomCode } from '@/lib/utils';
-import type { RoomData, FileItem } from '@/types';
+import type { RoomData, FileItem, RoomRow } from '@/types';
+
+function rowToRoom(row: RoomRow): RoomData {
+  return {
+    code: row.code,
+    createdAt: Number(row.created_at),
+    expiresAt: Number(row.expires_at),
+    senderId: row.sender_id,
+    receiverId: row.receiver_id,
+    senderConnected: row.sender_connected,
+    receiverConnected: row.receiver_connected,
+    status: row.status,
+    files: (row.files || []) as FileItem[],
+  };
+}
 
 export function useRoom() {
   const [room, setRoom] = useState<RoomData | null>(null);
@@ -36,46 +39,66 @@ export function useRoom() {
     try {
       const uid = await ensureAuth();
       uidRef.current = uid;
+      const supabase = getSupabase();
       let code = generateRoomCode();
       let attempts = 0;
 
       while (attempts < 10) {
-        const existing = await getDoc(doc(db, 'rooms', code));
-        if (!existing.exists()) break;
+        const { data: existing } = await supabase
+          .from('rooms')
+          .select('code')
+          .eq('code', code)
+          .maybeSingle();
+        if (!existing) break;
         code = generateRoomCode();
         attempts++;
       }
 
       const now = Date.now();
-      const roomData: RoomData = {
+      const row: RoomRow = {
         code,
-        createdAt: now,
-        expiresAt: now + 60 * 60 * 1000,
-        senderId: uid,
-        receiverId: null,
-        senderConnected: true,
-        receiverConnected: false,
+        created_at: now,
+        expires_at: now + 60 * 60 * 1000,
+        sender_id: uid,
+        receiver_id: null,
+        sender_connected: true,
+        receiver_connected: false,
         status: 'waiting',
         files: [],
       };
 
-      await setDoc(doc(db, 'rooms', code), roomData);
-      setRoom(roomData);
+      const { error: insertError } = await supabase.from('rooms').insert(row);
+      if (insertError) throw insertError;
 
-      unsubRef.current = onSnapshot(
-        doc(db, 'rooms', code),
-        (snap) => {
-          if (!snap.exists()) {
-            setRoom(null);
-            return;
+      setRoom(rowToRoom(row));
+
+      // Subscribe to realtime changes
+      const channel = supabase
+        .channel(`room:${code}`)
+        .on('postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'rooms',
+            filter: `code=eq.${code}`,
+          },
+          (payload) => {
+            if (payload.eventType === 'DELETE') {
+              setRoom(null);
+              return;
+            }
+            const updated = payload.new as RoomRow;
+            if (updated.expires_at < Date.now() && updated.status !== 'expired') {
+              supabase.from('rooms').update({ status: 'expired' }).eq('code', code);
+            }
+            setRoom(rowToRoom(updated));
           }
-          const data = snap.data() as RoomData;
-          if (data.expiresAt < Date.now() && data.status !== 'expired') {
-            updateDoc(doc(db, 'rooms', code), { status: 'expired' });
-          }
-          setRoom(data);
-        }
-      );
+        )
+        .subscribe();
+
+      unsubRef.current = () => {
+        supabase.removeChannel(channel);
+      };
 
       return code;
     } catch (e) {
@@ -93,44 +116,66 @@ export function useRoom() {
     try {
       const uid = await ensureAuth();
       uidRef.current = uid;
-      const snap = await getDoc(doc(db, 'rooms', code));
+      const supabase = getSupabase();
 
-      if (!snap.exists()) {
-        throw new Error('Room not found');
-      }
+      const { data: row, error: fetchError } = await supabase
+        .from('rooms')
+        .select('*')
+        .eq('code', code)
+        .maybeSingle();
 
-      const data = snap.data() as RoomData;
+      if (fetchError) throw fetchError;
+      if (!row) throw new Error('Room not found');
 
-      if (data.expiresAt < Date.now() || data.status === 'expired') {
-        await updateDoc(doc(db, 'rooms', code), { status: 'expired' });
+      if (row.expires_at < Date.now() || row.status === 'expired') {
+        await supabase.from('rooms').update({ status: 'expired' }).eq('code', code);
         throw new Error('This room has expired');
       }
 
-      if (data.status !== 'waiting') {
+      if (row.status !== 'waiting') {
         throw new Error('Room is no longer accepting connections');
       }
 
-      await updateDoc(doc(db, 'rooms', code), {
-        receiverId: uid,
-        receiverConnected: true,
-        status: 'connected',
-      });
+      const { error: updateError } = await supabase
+        .from('rooms')
+        .update({
+          receiver_id: uid,
+          receiver_connected: true,
+          status: 'connected',
+        })
+        .eq('code', code);
 
-      data.receiverId = uid;
-      data.receiverConnected = true;
-      data.status = 'connected';
-      setRoom(data);
+      if (updateError) throw updateError;
 
-      unsubRef.current = onSnapshot(
-        doc(db, 'rooms', code),
-        (snap) => {
-          if (!snap.exists()) {
-            setRoom(null);
-            return;
+      row.receiver_id = uid;
+      row.receiver_connected = true;
+      row.status = 'connected';
+      setRoom(rowToRoom(row));
+
+      // Subscribe to realtime changes
+      const channel = supabase
+        .channel(`room:${code}`)
+        .on('postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'rooms',
+            filter: `code=eq.${code}`,
+          },
+          (payload) => {
+            if (payload.eventType === 'DELETE') {
+              setRoom(null);
+              return;
+            }
+            const updated = payload.new as RoomRow;
+            setRoom(rowToRoom(updated));
           }
-          setRoom(snap.data() as RoomData);
-        }
-      );
+        )
+        .subscribe();
+
+      unsubRef.current = () => {
+        supabase.removeChannel(channel);
+      };
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to join room';
       setError(msg);
@@ -144,21 +189,19 @@ export function useRoom() {
     cleanup();
     if (room && uidRef.current) {
       try {
-        await deleteDoc(doc(db, 'rooms', room.code));
-        const storageRef = ref(storage, `rooms/${room.code}`);
-        try {
-          await deleteObject(storageRef);
-        } catch { }
+        const supabase = getSupabase();
+        await supabase.from('rooms').delete().eq('code', room.code);
       } catch { }
     }
     setRoom(null);
     uidRef.current = null;
   }, [room, cleanup]);
 
-  const updateRoom = useCallback(async (data: Partial<RoomData>) => {
+  const updateRoom = useCallback(async (data: Partial<RoomRow>) => {
     if (!room) return;
     try {
-      await updateDoc(doc(db, 'rooms', room.code), data);
+      const supabase = getSupabase();
+      await supabase.from('rooms').update(data).eq('code', room.code);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to update room';
       setError(msg);
@@ -168,10 +211,12 @@ export function useRoom() {
   const addFile = useCallback(async (file: FileItem) => {
     if (!room) return;
     try {
-      await updateDoc(doc(db, 'rooms', room.code), {
-        files: [...(room.files || []), file],
-        status: 'transferring',
-      });
+      const supabase = getSupabase();
+      const files = [...(room.files || []), file];
+      await supabase
+        .from('rooms')
+        .update({ files: files, status: 'transferring' })
+        .eq('code', room.code);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to add file';
       setError(msg);
@@ -185,12 +230,17 @@ export function useRoom() {
     );
     const allDownloaded = files.every((f) => f.downloaded);
     try {
-      await updateDoc(doc(db, 'rooms', room.code), {
-        files,
-        status: allDownloaded ? 'completed' : room.status,
-      });
+      const supabase = getSupabase();
+      await supabase
+        .from('rooms')
+        .update({
+          files,
+          status: allDownloaded ? 'completed' : room.status,
+        })
+        .eq('code', room.code);
+
       if (allDownloaded) {
-        await cleanupRoom(room.code);
+        await supabase.from('rooms').delete().eq('code', room.code);
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to update file';
@@ -212,23 +262,18 @@ export function useRoom() {
   };
 }
 
-async function cleanupRoom(code: string) {
-  try {
-    await deleteDoc(doc(db, 'rooms', code));
-  } catch { }
-  try {
-    const storageRef = ref(storage, `rooms/${code}`);
-    await deleteObject(storageRef);
-  } catch { }
-}
-
 export async function checkRoomExists(code: string): Promise<boolean> {
   try {
-    const snap = await getDoc(doc(db, 'rooms', code));
-    if (!snap.exists()) return false;
-    const data = snap.data() as RoomData;
-    if (data.expiresAt < Date.now() || data.status === 'expired') {
-      await updateDoc(doc(db, 'rooms', code), { status: 'expired' });
+    const supabase = getSupabase();
+    const { data: row } = await supabase
+      .from('rooms')
+      .select('code, expires_at, status')
+      .eq('code', code)
+      .maybeSingle();
+
+    if (!row) return false;
+    if (row.expires_at < Date.now() || row.status === 'expired') {
+      await supabase.from('rooms').update({ status: 'expired' }).eq('code', code);
       return false;
     }
     return true;

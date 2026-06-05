@@ -4,20 +4,20 @@
 
 A brutalist, utility-first web-based file transfer app. Create a room, share the 6-digit code (or QR), and send files directly to another device — no sign-ups, no servers, no bloat.
 
-Built with Next.js, Firebase, and a strict anti-slop design philosophy.
+Built with Next.js and Supabase.
 
 ---
 
 ## Features
 
-- **Peer-to-peer feel over Firebase** — Real-time room sync via Firestore, file transfer via Firebase Storage. No signaling servers, no WebRTC complexity.
-- **Zero-loss files** — Raw blob upload/download. No compression, no transcoding, no quality loss. Every byte is preserved.
+- **Peer-to-peer feel over Supabase** — Real-time room sync via Postgres replication, file transfer via Supabase Storage. No signaling servers, no WebRTC complexity.
+- **Zero-loss files** — Raw blob upload/download. No compression, no transcoding, no quality loss.
 - **Quick pairing** — Generate a 6-digit room code or scan a QR to instantly connect two devices.
 - **Real-time progress** — Upload speed, ETA, and percentage update live during transfers.
 - **1-hour auto-expiry** — Rooms and files are cleaned up after 1 hour or immediately after download completes.
 - **Dark/light mode** — Persistent theme toggle with no-FOUC flash prevention.
 - **QR scanner** — Camera-based QR scanning with manual code entry fallback.
-- **1GB file limit** — Enforced client-side and in Firebase Storage rules.
+- **1GB file limit**.
 
 ---
 
@@ -26,64 +26,44 @@ Built with Next.js, Firebase, and a strict anti-slop design philosophy.
 | Layer | Choice |
 |---|---|
 | Framework | [Next.js 16](https://nextjs.org/) (App Router) |
-| Styling | [Tailwind CSS 4](https://tailwindcss.com/) — CSS-first config |
+| Styling | [Tailwind CSS 4](https://tailwindcss.com/) |
 | Font | [Geist](https://vercel.com/font) by Vercel |
 | Icons | [Lucide React](https://lucide.dev/) |
 | QR generation | [qrcode.react](https://github.com/zpao/qrcode.react) |
 | QR scanning | [jsQR](https://github.com/cozmo/jsQR) |
-| Backend | [Firebase](https://firebase.google.com/) v11+ |
-| Auth | Firebase Anonymous Authentication |
-| Database | Cloud Firestore (real-time) |
-| Storage | Cloud Storage (raw file blobs) |
+| Backend | [Supabase](https://supabase.com/) |
+| Auth | Supabase Anonymous Auth |
+| Database | Postgres with Realtime subscriptions |
+| Storage | Supabase Storage (private S3-backed buckets) |
 
 ---
 
-## Getting Started
+## Setup
 
-### Prerequisites
+### 1. Supabase project
 
-- Node.js 18+
-- A Firebase project with Anonymous Auth, Firestore, and Storage enabled
+1. Go to [supabase.com](https://supabase.com) → **New project**
+2. Fill in project details and wait for the database to provision
+3. Enable **Anonymous sign-ins**: Authentication → Settings → **Allow anonymous sign-ins** → toggle on → Save
+4. Run the SQL schema from `supabase/schema.sql` in the **SQL Editor**
 
-### Setup
+### 2. Environment variables
 
-1. Clone the repo:
+Copy `.env.local.example` to `.env.local` and fill in your Supabase keys:
 
-```bash
-git clone https://github.com/Pulkitt397/NexSend.git
-cd NexSend
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
 ```
 
-2. Install dependencies:
+You can find these in your Supabase dashboard → **Project Settings** → **API**.
+
+### 3. Install & run
 
 ```bash
 npm install
-```
-
-3. Create a `.env.local` file in the project root with your Firebase config:
-
-```env
-NEXT_PUBLIC_FIREBASE_API_KEY=your-api-key
-NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=your-project-id
-NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=your-project.appspot.com
-NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=your-sender-id
-NEXT_PUBLIC_FIREBASE_APP_ID=your-app-id
-```
-
-4. Run the dev server:
-
-```bash
 npm run dev
 ```
-
-### Firebase Setup
-
-1. Go to [Firebase Console](https://console.firebase.google.com/) → your project
-2. **Authentication** → Sign-in method → Enable **Anonymous**
-3. **Firestore** → Create database → choose a region → start in test mode
-4. **Storage** → Get started → start in test mode
-5. Copy the security rules from `firestore.rules` and `storage.rules` into the Firebase console rule editors
 
 ---
 
@@ -100,63 +80,56 @@ npm run dev
 
 ---
 
+## Project Structure
+
+```
+src/
+├── app/
+│   ├── page.tsx                # Home — SEND / RECEIVE buttons
+│   ├── send/page.tsx           # Create room, drop file, upload
+│   ├── receive/
+│   │   ├── page.tsx            # Suspense wrapper
+│   │   └── ReceiveContent.tsx  # Enter code / scan QR, download
+│   └── room/[code]/page.tsx    # Direct room link (QR deep-link)
+├── components/
+│   ├── CreateRoom.tsx
+│   ├── JoinRoom.tsx
+│   ├── FileDropzone.tsx
+│   ├── FileReceiver.tsx
+│   ├── TransferProgress.tsx
+│   ├── QRDisplay.tsx
+│   ├── QRScanner.tsx
+│   ├── ThemeToggle.tsx
+│   └── Toast.tsx
+├── hooks/
+│   ├── useRoom.ts              # Supabase Realtime room subscription
+│   ├── useFileTransfer.ts      # XHR upload with progress + Storage download
+│   └── useTheme.ts
+├── lib/
+│   └── supabase.ts             # Supabase client + anonymous auth
+├── types/index.ts
+└── app/globals.css
+```
+
+---
+
 ## Deploy to Vercel
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FPulkitt397%2FNexSend)
 
 1. Push to GitHub
-2. Import the repo in Vercel
-3. Add the `NEXT_PUBLIC_FIREBASE_*` environment variables in Vercel project settings
-4. Deploy — zero configuration needed
-
----
-
-## Project Structure
-
-```
-src/
-├── app/                     # Next.js App Router pages
-│   ├── page.tsx             # Home — SEND / RECEIVE buttons
-│   ├── send/page.tsx        # Create room, drop file, upload
-│   ├── receive/             # Enter code / scan QR, download
-│   └── room/[code]/page.tsx # Direct room link (QR deep-link)
-├── components/              # UI components
-│   ├── CreateRoom.tsx       # Room code display + QR
-│   ├── JoinRoom.tsx         # 6-digit PIN entry + QR scanner
-│   ├── FileDropzone.tsx     # Drag-and-drop upload zone
-│   ├── FileReceiver.tsx     # Incoming file download card
-│   ├── TransferProgress.tsx # Progress bar + speed + ETA
-│   ├── QRDisplay.tsx        # QR code renderer
-│   ├── QRScanner.tsx        # Camera QR scanner
-│   ├── ThemeToggle.tsx      # Dark/light mode toggle
-│   └── Toast.tsx            # Notification system
-├── hooks/                   # React hooks
-│   ├── useRoom.ts           # Firestore room CRUD + real-time sync
-│   ├── useFileTransfer.ts   # Upload/download with progress tracking
-│   └── useTheme.ts          # Theme persistence
-├── lib/
-│   ├── firebase.ts          # Firebase initialization + anon auth
-│   └── utils.ts             # formatBytes, formatSpeed, generateCode
-└── types/index.ts           # TypeScript type definitions
-```
-
----
-
-## Security Rules
-
-See `firestore.rules` and `storage.rules` for the Firebase security configuration:
-- Firestore: authenticated users only, sender/receiver scoped access
-- Storage: authenticated users only, 1GB file size cap, room-scoped paths
+2. Import in Vercel
+3. Add env vars in Vercel project settings
+4. Deploy
 
 ---
 
 ## Design Principles
 
 - **Brutalist**: Flat surfaces, sharp borders (0 radius), no shadows, no gradients
-- **Utility-first**: Every element serves a function — no decorative flourishes
+- **Utility-first**: Every element serves a function
 - **Anti-slop**: No dashboard cards, no floating shapes, no confetti, no jargon
-- **Typographic**: Geist font, three sizes max, generous whitespace
-- **Monochromatic**: High-contrast dark/light modes with a single blue accent
+- **Monochromatic**: High-contrast dark/light with a single blue accent
 
 ---
 

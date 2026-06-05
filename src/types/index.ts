@@ -30,3 +30,17 @@ export interface TransferState {
   remaining: number;
   error?: string;
 }
+
+// Database row shape (Supabase)
+export interface RoomRow {
+  code: string;
+  created_at: number;
+  expires_at: number;
+  sender_id: string;
+  receiver_id: string | null;
+  sender_connected: boolean;
+  receiver_connected: boolean;
+  status: RoomData['status'];
+  files: FileItem[];
+}
+
