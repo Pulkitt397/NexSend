@@ -1,0 +1,35 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /rooms/{roomCode} {
+      // Anyone authenticated can create a room
+      allow create: if request.auth != null
+                    && request.resource.data.senderId == request.auth.uid;
+
+      // Read allowed if authenticated and room exists
+      allow read: if request.auth != null;
+
+      // Update allowed if you're the sender or receiver
+      allow update: if request.auth != null
+                    && (resource.data.senderId == request.auth.uid
+                        || resource.data.receiverId == request.auth.uid);
+
+      // Delete allowed for sender (cleanup after download) or after expiry
+      allow delete: if request.auth != null
+                    && resource.data.senderId == request.auth.uid;
+
+      // Validate room data on create
+      allow create: if request.auth != null
+                    && request.resource.data.senderId == request.auth.uid
+                    && request.resource.data.code is string
+                    && request.resource.data.code.size() == 6
+                    && request.resource.data.createdAt is number
+                    && request.resource.data.expiresAt is number
+                    && request.resource.data.expiresAt == request.resource.data.createdAt + 3600000
+                    && request.resource.data.status == 'waiting'
+                    && request.resource.data.files.size() == 0;
+    }
+  }
+}
