@@ -31,8 +31,9 @@ export default function SendPage() {
       const code = await createRoom();
       setRoomCode(code);
       toast('Room created', 'success');
-    } catch {
-      toast('Failed to create room', 'error');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to create room';
+      toast(msg, 'error');
     }
   }, [createRoom]);
 
